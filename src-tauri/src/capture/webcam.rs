@@ -51,7 +51,7 @@ pub fn run_webcam_capture(
     stop_signal: Arc<AtomicBool>,
 ) -> Result<()> {
     let index = CameraIndex::Index(webcam_index as u32);
-    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(1280, 720, 30));
 
     let mut camera = Camera::new(index, requested)
         .map_err(|e| anyhow!("Failed to open webcam {}: {}", webcam_index, e))?;

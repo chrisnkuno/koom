@@ -117,7 +117,6 @@ pub async fn start_recording(
         *wc = config.webcam_corner.clone();
     }
 
-    let output_dir = state.output_dir.read().await.clone();
     let temp_dir = std::env::temp_dir();
     let tmp_screen = temp_dir.join(format!("{}_screen.mp4", session_name)).to_string_lossy().to_string();
     let tmp_webcam = temp_dir.join(format!("{}_webcam.mp4", session_name)).to_string_lossy().to_string();
@@ -130,9 +129,13 @@ pub async fn start_recording(
     let screen_path = tmp_screen.clone();
     let monitor_idx = config.monitor_index;
     let screen_handle = tokio::spawn(async move {
-        if let Err(e) = run_screen_capture(monitor_idx, fps, screen_path, stop_screen).await {
-            log::error!("Screen capture error: {}", e);
-        }
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = run_screen_capture(monitor_idx, fps, screen_path, stop_screen) {
+                log::error!("Screen capture error: {}", e);
+            }
+        })
+        .await
+        .ok();
     });
     *state.screen_task.lock().await = Some(screen_handle);
 
@@ -213,17 +216,20 @@ pub async fn stop_recording(state: State<'_, RecordingState>) -> Result<String, 
     let tmp_screen = temp_dir.join(format!("{}_screen.mp4", session_name)).to_string_lossy().to_string();
     let tmp_webcam = temp_dir.join(format!("{}_webcam.mp4", session_name)).to_string_lossy().to_string();
     let tmp_audio = temp_dir.join(format!("{}_audio.wav", session_name)).to_string_lossy().to_string();
-    let final_output = format!("{}/{}.mp4", output_dir, session_name);
+    let final_output = std::path::Path::new(&output_dir)
+        .join(format!("{}.mp4", session_name))
+        .to_string_lossy()
+        .to_string();
 
     // Run merge in a blocking thread
     let final_out_clone = final_output.clone();
     tokio::task::spawn_blocking(move || {
-        let webcam = if webcam_enabled && std::path::Path::new(&tmp_webcam).exists() {
+        let webcam = if webcam_enabled && std::fs::metadata(&tmp_webcam).map(|m| m.len() > 1024).unwrap_or(false) {
             Some(tmp_webcam.as_str())
         } else {
             None
         };
-        let audio = if mic_enabled && std::path::Path::new(&tmp_audio).exists() {
+        let audio = if mic_enabled && std::fs::metadata(&tmp_audio).map(|m| m.len() > 1024).unwrap_or(false) {
             Some(tmp_audio.as_str())
         } else {
             None

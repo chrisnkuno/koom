@@ -114,7 +114,7 @@ pub fn generate_thumbnail(video_path: &str, thumb_path: &str) -> Result<()> {
         .args([
             "-y",
             "-i", video_path,
-            "-ss", "00:00:01",
+            "-ss", "00:00:00.000",
             "-vframes", "1",
             "-vf", "scale=400:-1",
             thumb_path,

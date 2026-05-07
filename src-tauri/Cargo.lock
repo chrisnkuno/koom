@@ -2350,6 +2350,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "cpal",
+ "dirs",
  "env_logger",
  "hound",
  "image 0.25.10",

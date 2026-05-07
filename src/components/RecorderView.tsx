@@ -43,12 +43,14 @@ function CornerPicker() {
 }
 
 // ── Webcam Preview ───────────────────────────────────────────────────────── //
-function WebcamPreview({ webcamEnabled }: { webcamEnabled: boolean }) {
+function WebcamPreview({ webcamEnabled, isRecording }: { webcamEnabled: boolean; isRecording: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [hasWebcam, setHasWebcam] = useState(false);
 
   useEffect(() => {
-    if (!webcamEnabled) {
+    // On Windows, only one process can use the camera at a time.
+    // If we are recording in the backend, we MUST stop the frontend preview.
+    if (!webcamEnabled || isRecording) {
       if (videoRef.current?.srcObject) {
         const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
         tracks.forEach((t) => t.stop());
@@ -58,7 +60,7 @@ function WebcamPreview({ webcamEnabled }: { webcamEnabled: boolean }) {
       return;
     }
     navigator.mediaDevices
-      .getUserMedia({ video: true })
+      .getUserMedia({ video: { width: 1280, height: 720 } })
       .then((stream) => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -72,7 +74,7 @@ function WebcamPreview({ webcamEnabled }: { webcamEnabled: boolean }) {
         tracks.forEach((t) => t.stop());
       }
     };
-  }, [webcamEnabled]);
+  }, [webcamEnabled, isRecording]);
 
   if (!webcamEnabled) return null;
 
@@ -129,7 +131,7 @@ export function RecorderView() {
           <h1 className="view-title">New Recording</h1>
           <p className="view-subtitle">Configure and start your recording session</p>
         </div>
-        {webcamEnabled && <WebcamPreview webcamEnabled={webcamEnabled} />}
+        {webcamEnabled && <WebcamPreview webcamEnabled={webcamEnabled} isRecording={isRecording} />}
       </div>
 
       {/* Record Controls */}
