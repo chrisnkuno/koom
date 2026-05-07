@@ -331,6 +331,19 @@ pub async fn delete_recording(path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn open_output_dir(state: State<'_, RecordingState>) -> Result<(), String> {
     let dir = state.output_dir.read().await.clone();
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("explorer")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "linux")]
     std::process::Command::new("xdg-open")
         .arg(&dir)
         .spawn()
