@@ -1,12 +1,11 @@
-mod state;
 mod capture;
-mod encoder;
 mod commands;
+mod encoder;
+mod state;
 
 use commands::recording::{
-    get_monitors, get_webcams,
-    start_recording, stop_recording, get_recording_status,
-    list_recordings, delete_recording, open_output_dir,
+    delete_recording, get_monitors, get_recording_status, get_webcams, list_recordings,
+    open_output_dir, start_recording, stop_recording,
 };
 use state::RecordingState;
 

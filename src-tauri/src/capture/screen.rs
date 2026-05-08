@@ -12,11 +12,13 @@ use std::time::Duration;
 use std::time::Instant;
 use xcap::Monitor;
 
+use crate::encoder::ffmpeg::ffmpeg_program;
+
 /// Spawns an FFmpeg process that reads raw RGBA frames from stdin
 /// and writes an H.264 MP4 at the given path.
 #[cfg(not(target_os = "windows"))]
 pub fn spawn_ffmpeg_screen(width: u32, height: u32, fps: u32, output_path: &str) -> Result<Child> {
-    let child = Command::new("ffmpeg")
+    let child = Command::new(ffmpeg_program())
         .args([
             "-y",
             "-f",
@@ -84,7 +86,7 @@ pub fn run_screen_capture(
             output_path
         );
 
-        let mut child = Command::new("ffmpeg")
+        let mut child = Command::new(ffmpeg_program())
             .args([
                 "-y",
                 "-f",

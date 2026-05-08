@@ -12,10 +12,12 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use crate::encoder::ffmpeg::ffmpeg_program;
+
 /// Spawns an FFmpeg process that reads raw RGB24 frames from stdin
 /// and writes an H.264 MP4 for the webcam feed.
 pub fn spawn_ffmpeg_webcam(width: u32, height: u32, fps: u32, output_path: &str) -> Result<Child> {
-    let child = Command::new("ffmpeg")
+    let child = Command::new(ffmpeg_program())
         .args([
             "-y",
             "-f",

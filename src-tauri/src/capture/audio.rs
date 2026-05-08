@@ -11,10 +11,7 @@ use std::sync::{
 
 /// Records microphone audio to a WAV file.
 /// Blocks (on a background thread) until stop_signal is set.
-pub fn run_audio_capture(
-    output_path: String,
-    stop_signal: Arc<AtomicBool>,
-) -> Result<()> {
+pub fn run_audio_capture(output_path: String, stop_signal: Arc<AtomicBool>) -> Result<()> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -74,7 +71,9 @@ pub fn run_audio_capture(
                 move |data: &[f32], _| {
                     if let Ok(mut wtr) = w.lock() {
                         for &sample in data {
-                            let s = (sample * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                            let s = (sample * i16::MAX as f32)
+                                .clamp(i16::MIN as f32, i16::MAX as f32)
+                                as i16;
                             wtr.write_sample(s).ok();
                         }
                     }
@@ -102,7 +101,9 @@ pub fn run_audio_capture(
         fmt => return Err(anyhow!("Unsupported audio sample format: {:?}", fmt)),
     };
 
-    stream.play().map_err(|e| anyhow!("Failed to start audio stream: {}", e))?;
+    stream
+        .play()
+        .map_err(|e| anyhow!("Failed to start audio stream: {}", e))?;
 
     // Poll the stop signal at 100ms intervals
     while !stop_signal.load(Ordering::Relaxed) {

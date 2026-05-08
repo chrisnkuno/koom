@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use std::process::Command;
 
+use crate::encoder::ffmpeg::ffmpeg_program;
+
 /// Merges screen.mp4 + webcam.mp4 + audio.wav into a final output.mp4
 /// using FFmpeg's overlay (picture-in-picture) filter.
 ///
@@ -29,21 +31,33 @@ pub fn merge_recordings(
                  [0:v][webcam]overlay={}[out]",
                 overlay_pos
             );
-            let status = Command::new("ffmpeg")
+            let status = Command::new(ffmpeg_program())
                 .args([
                     "-y",
-                    "-i", screen_path,
-                    "-i", webcam,
-                    "-i", audio,
-                    "-filter_complex", &filter,
-                    "-map", "[out]",
-                    "-map", "2:a",
-                    "-c:v", "libx264",
-                    "-pix_fmt", "yuv420p",
-                    "-preset", "fast",
-                    "-crf", "22",
-                    "-c:a", "aac",
-                    "-b:a", "192k",
+                    "-i",
+                    screen_path,
+                    "-i",
+                    webcam,
+                    "-i",
+                    audio,
+                    "-filter_complex",
+                    &filter,
+                    "-map",
+                    "[out]",
+                    "-map",
+                    "2:a",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "22",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
                     output_path,
                 ])
                 .status()?;
@@ -54,14 +68,19 @@ pub fn merge_recordings(
 
         // Screen + Audio only
         (None, Some(audio)) => {
-            let status = Command::new("ffmpeg")
+            let status = Command::new(ffmpeg_program())
                 .args([
                     "-y",
-                    "-i", screen_path,
-                    "-i", audio,
-                    "-c:v", "copy",
-                    "-c:a", "aac",
-                    "-b:a", "192k",
+                    "-i",
+                    screen_path,
+                    "-i",
+                    audio,
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
                     output_path,
                 ])
                 .status()?;
@@ -78,17 +97,25 @@ pub fn merge_recordings(
                  [0:v][webcam]overlay={}[out]",
                 overlay_pos
             );
-            let status = Command::new("ffmpeg")
+            let status = Command::new(ffmpeg_program())
                 .args([
                     "-y",
-                    "-i", screen_path,
-                    "-i", webcam,
-                    "-filter_complex", &filter,
-                    "-map", "[out]",
-                    "-c:v", "libx264",
-                    "-pix_fmt", "yuv420p",
-                    "-preset", "fast",
-                    "-crf", "22",
+                    "-i",
+                    screen_path,
+                    "-i",
+                    webcam,
+                    "-filter_complex",
+                    &filter,
+                    "-map",
+                    "[out]",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "22",
                     output_path,
                 ])
                 .status()?;
@@ -110,13 +137,17 @@ pub fn merge_recordings(
 
 /// Generate a thumbnail from the first second of a video using FFmpeg
 pub fn generate_thumbnail(video_path: &str, thumb_path: &str) -> Result<()> {
-    let status = Command::new("ffmpeg")
+    let status = Command::new(ffmpeg_program())
         .args([
             "-y",
-            "-i", video_path,
-            "-ss", "00:00:00.000",
-            "-vframes", "1",
-            "-vf", "scale=400:-1",
+            "-i",
+            video_path,
+            "-ss",
+            "00:00:00.000",
+            "-vframes",
+            "1",
+            "-vf",
+            "scale=400:-1",
             thumb_path,
         ])
         .stdout(std::process::Stdio::null())

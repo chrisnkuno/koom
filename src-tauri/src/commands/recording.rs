@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::capture::audio::run_audio_capture;
 use crate::capture::screen::run_screen_capture;
 use crate::capture::webcam::run_webcam_capture;
+use crate::encoder::ffmpeg::ensure_ffmpeg_available;
 use crate::encoder::merge::{generate_thumbnail, merge_recordings};
 use crate::state::RecordingState;
 
@@ -255,6 +256,8 @@ pub async fn start_recording(
             return Err(RecordingError::AlreadyRecording.to_string());
         }
     }
+
+    ensure_ffmpeg_available().map_err(|e| e.to_string())?;
 
     *state.status.write().await = RecordingStatus::Starting;
 
