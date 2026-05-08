@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { useRecordingStore } from "../store";
 import { RecordingInfo } from "../api";
 
@@ -85,7 +86,7 @@ function VideoModal({
           </button>
         </div>
         <video
-          src={`asset://localhost/${encodeURIComponent(recording.path)}`}
+          src={convertFileSrc(recording.path)}
           controls
           autoPlay
         />
@@ -151,7 +152,7 @@ export function LibraryView() {
                 <div className="recording-thumb">
                   {rec.thumbnail ? (
                     <img
-                      src={`asset://localhost/${encodeURIComponent(rec.thumbnail)}`}
+                      src={convertFileSrc(rec.thumbnail)}
                       alt={rec.filename}
                     />
                   ) : (

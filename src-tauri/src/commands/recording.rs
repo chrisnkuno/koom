@@ -1,13 +1,35 @@
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::Ordering;
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant, SystemTime},
+};
 use tauri::State;
-use chrono::Local;
+use tokio::task::JoinHandle;
+use uuid::Uuid;
 
-use crate::state::{RecordingState, RecordingStatus};
+use crate::capture::audio::run_audio_capture;
 use crate::capture::screen::run_screen_capture;
 use crate::capture::webcam::run_webcam_capture;
-use crate::capture::audio::run_audio_capture;
-use crate::encoder::merge::{merge_recordings, generate_thumbnail};
+use crate::encoder::merge::{generate_thumbnail, merge_recordings};
+use crate::state::RecordingState;
+
+const MIN_VALID_FILE_SIZE: u64 = 1024;
+const TASK_STOP_TIMEOUT_SECS: u64 = 10;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum RecordingStatus {
+    Idle,
+    Starting,
+    Recording,
+    Stopping,
+    Merging,
+    Error(String),
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MonitorInfo {
@@ -41,14 +63,155 @@ pub struct RecordingConfig {
     pub mic_enabled: bool,
     pub webcam_enabled: bool,
     pub webcam_index: usize,
-    pub webcam_corner: String, // "br" | "bl" | "tr" | "tl"
+    pub webcam_corner: String,
     pub fps: u32,
 }
 
-/// List all available monitors
+#[derive(Debug, Clone)]
+pub struct RecordingSession {
+    pub id: String,
+    pub temp_dir: PathBuf,
+    pub screen_file: PathBuf,
+    pub webcam_file: PathBuf,
+    pub audio_file: PathBuf,
+    pub output_file: PathBuf,
+    pub started_at: Instant,
+    pub created_at: DateTime<Local>,
+    pub config: RecordingConfig,
+}
+
+#[derive(Default)]
+pub struct RecordingTasks {
+    pub screen: Option<JoinHandle<()>>,
+    pub webcam: Option<JoinHandle<()>>,
+    pub audio: Option<JoinHandle<()>>,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum RecordingError {
+    #[error("Already recording")]
+    AlreadyRecording,
+
+    #[error("No active recording")]
+    NoActiveRecording,
+
+    #[error("Invalid recording file: {0}")]
+    InvalidRecording(String),
+
+    #[error("Task timeout")]
+    TaskTimeout,
+
+    #[error("Merge failed: {0}")]
+    Merge(String),
+
+    #[error("IO error: {0}")]
+    Io(String),
+
+    #[error("Capture error: {0}")]
+    Capture(String),
+}
+
+impl From<std::io::Error> for RecordingError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value.to_string())
+    }
+}
+
+type Result<T> = std::result::Result<T, RecordingError>;
+
+fn validate_file(path: &Path) -> bool {
+    path.exists()
+        && std::fs::metadata(path)
+            .map(|m| m.len() > MIN_VALID_FILE_SIZE)
+            .unwrap_or(false)
+}
+
+async fn spawn_capture_task<F>(name: &'static str, task: F) -> Result<JoinHandle<()>>
+where
+    F: FnOnce() -> anyhow::Result<()> + Send + 'static,
+{
+    Ok(tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(task).await;
+
+        match result {
+            Ok(Ok(())) => {
+                log::info!("{} task completed", name);
+            }
+
+            Ok(Err(e)) => {
+                log::error!("{} task failed: {}", name, e);
+            }
+
+            Err(e) => {
+                log::error!("{} task panicked: {}", name, e);
+            }
+        }
+    }))
+}
+
+async fn wait_for_task(handle: JoinHandle<()>) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(TASK_STOP_TIMEOUT_SECS), handle)
+        .await
+        .map_err(|_| RecordingError::TaskTimeout)?
+        .map_err(|e| RecordingError::Capture(e.to_string()))?;
+
+    Ok(())
+}
+
+async fn cleanup_session(session: &RecordingSession) {
+    let _ = std::fs::remove_file(&session.screen_file);
+    let _ = std::fs::remove_file(&session.webcam_file);
+    let _ = std::fs::remove_file(&session.audio_file);
+    let _ = std::fs::remove_dir_all(&session.temp_dir);
+}
+
+fn finalize_recording(session: &RecordingSession) -> Result<()> {
+    let screen_exists = validate_file(&session.screen_file);
+
+    if !screen_exists {
+        return Err(RecordingError::InvalidRecording(
+            "Screen recording missing".into(),
+        ));
+    }
+
+    let webcam = if session.config.webcam_enabled && validate_file(&session.webcam_file) {
+        Some(session.webcam_file.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    let audio = if session.config.mic_enabled && validate_file(&session.audio_file) {
+        Some(session.audio_file.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    let output = session.output_file.to_string_lossy().to_string();
+
+    let screen = session.screen_file.to_string_lossy().to_string();
+
+    merge_recordings(
+        &screen,
+        webcam.as_deref(),
+        audio.as_deref(),
+        &output,
+        &session.config.webcam_corner,
+    )
+    .map_err(|e| RecordingError::Merge(e.to_string()))?;
+
+    let thumb_path = output.replace(".mp4", "_thumb.jpg");
+
+    if let Err(e) = generate_thumbnail(&output, &thumb_path) {
+        log::warn!("Thumbnail generation failed: {}", e);
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
-pub async fn get_monitors() -> Result<Vec<MonitorInfo>, String> {
+pub async fn get_monitors() -> std::result::Result<Vec<MonitorInfo>, String> {
     let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+
     let infos = monitors
         .into_iter()
         .enumerate()
@@ -60,14 +223,14 @@ pub async fn get_monitors() -> Result<Vec<MonitorInfo>, String> {
             is_primary: m.is_primary().unwrap_or(false),
         })
         .collect();
+
     Ok(infos)
 }
 
-/// List all available webcams
 #[tauri::command]
-pub async fn get_webcams() -> Result<Vec<WebcamInfo>, String> {
-    let cameras = nokhwa::query(nokhwa::utils::ApiBackend::Auto)
-        .map_err(|e| e.to_string())?;
+pub async fn get_webcams() -> std::result::Result<Vec<WebcamInfo>, String> {
+    let cameras = nokhwa::query(nokhwa::utils::ApiBackend::Auto).map_err(|e| e.to_string())?;
+
     let infos = cameras
         .into_iter()
         .enumerate()
@@ -76,267 +239,309 @@ pub async fn get_webcams() -> Result<Vec<WebcamInfo>, String> {
             name: info.human_name().to_string(),
         })
         .collect();
+
     Ok(infos)
 }
 
-/// Start a recording session
 #[tauri::command]
 pub async fn start_recording(
     config: RecordingConfig,
     state: State<'_, RecordingState>,
-) -> Result<String, String> {
-    // Prevent double-start
+) -> std::result::Result<String, String> {
     {
         let status = state.status.read().await;
-        if *status == RecordingStatus::Recording {
-            return Err("Already recording".to_string());
+
+        if *status != RecordingStatus::Idle {
+            return Err(RecordingError::AlreadyRecording.to_string());
         }
     }
 
-    // Reset stop signal
-    state.stop_signal.store(false, Ordering::Relaxed);
+    *state.status.write().await = RecordingStatus::Starting;
 
-    // Generate session name
-    let session_name = Local::now().format("koom_%Y%m%d_%H%M%S").to_string();
+    let session_id = Uuid::new_v4().to_string();
+
+    let temp_dir = std::env::temp_dir().join("koom").join(&session_id);
+
+    std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+
+    let output_dir = state.output_dir.read().await.clone();
+
+    let session = RecordingSession {
+        id: session_id.clone(),
+        temp_dir: temp_dir.clone(),
+
+        screen_file: temp_dir.join("screen.mp4"),
+
+        webcam_file: temp_dir.join("webcam.mp4"),
+
+        audio_file: temp_dir.join("audio.wav"),
+
+        output_file: Path::new(&output_dir).join(format!("{}.mp4", session_id)),
+
+        started_at: Instant::now(),
+
+        created_at: Local::now(),
+
+        config: RecordingConfig {
+            fps: config.fps.clamp(1, 60),
+            ..config.clone()
+        },
+    };
+
+    state.stop_signal.store(false, Ordering::SeqCst);
+
     {
-        let mut sn = state.session_name.write().await;
-        *sn = Some(session_name.clone());
+        let mut current = state.current_session.write().await;
+        *current = Some(session.clone());
     }
 
-    // Update config
+    let stop_signal: Arc<AtomicBool> = state.stop_signal.clone();
+
+    let mut tasks = RecordingTasks::default();
+
     {
-        let mut mi = state.monitor_index.write().await;
-        *mi = config.monitor_index;
-        let mut me = state.mic_enabled.write().await;
-        *me = config.mic_enabled;
-        let mut we = state.webcam_enabled.write().await;
-        *we = config.webcam_enabled;
-        let mut wi = state.webcam_index.write().await;
-        *wi = config.webcam_index;
-        let mut wc = state.webcam_corner.write().await;
-        *wc = config.webcam_corner.clone();
-    }
+        let session_clone = session.clone();
+        let stop = stop_signal.clone();
 
-    let temp_dir = std::env::temp_dir();
-    let tmp_screen = temp_dir.join(format!("{}_screen.mp4", session_name)).to_string_lossy().to_string();
-    let tmp_webcam = temp_dir.join(format!("{}_webcam.mp4", session_name)).to_string_lossy().to_string();
-    let tmp_audio = temp_dir.join(format!("{}_audio.wav", session_name)).to_string_lossy().to_string();
-
-    let fps = config.fps.max(1).min(60);
-
-    // ── Screen capture task ─────────────────────────────────────────────────
-    let stop_screen = state.stop_signal.clone();
-    let screen_path = tmp_screen.clone();
-    let monitor_idx = config.monitor_index;
-    let screen_handle = tokio::spawn(async move {
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = run_screen_capture(monitor_idx, fps, screen_path, stop_screen) {
-                log::error!("Screen capture error: {}", e);
-            }
-        })
-        .await
-        .ok();
-    });
-    *state.screen_task.lock().await = Some(screen_handle);
-
-    // ── Webcam capture task ─────────────────────────────────────────────────
-    if config.webcam_enabled {
-        let stop_webcam = state.stop_signal.clone();
-        let webcam_path = tmp_webcam.clone();
-        let cam_idx = config.webcam_index;
-        let webcam_handle = tokio::spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                if let Err(e) = run_webcam_capture(cam_idx, fps, webcam_path, stop_webcam) {
-                    log::error!("Webcam capture error: {}", e);
-                }
+        tasks.screen = Some(
+            spawn_capture_task("screen", move || {
+                run_screen_capture(
+                    session_clone.config.monitor_index,
+                    session_clone.config.fps,
+                    session_clone.screen_file.to_string_lossy().to_string(),
+                    stop,
+                )
             })
             .await
-            .ok();
-        });
-        *state.webcam_task.lock().await = Some(webcam_handle);
+            .map_err(|e| e.to_string())?,
+        );
     }
 
-    // ── Audio capture task (blocking thread) ───────────────────────────────
-    if config.mic_enabled {
-        let stop_audio = state.stop_signal.clone();
-        let audio_path = tmp_audio.clone();
-        let audio_handle = tokio::spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                if let Err(e) = run_audio_capture(audio_path, stop_audio) {
-                    log::error!("Audio capture error: {}", e);
-                }
+    if session.config.webcam_enabled {
+        let session_clone = session.clone();
+        let stop = stop_signal.clone();
+
+        tasks.webcam = Some(
+            spawn_capture_task("webcam", move || {
+                run_webcam_capture(
+                    session_clone.config.webcam_index,
+                    session_clone.config.fps,
+                    session_clone.webcam_file.to_string_lossy().to_string(),
+                    stop,
+                )
             })
             .await
-            .ok();
-        });
-        *state.audio_task.lock().await = Some(audio_handle);
+            .map_err(|e| e.to_string())?,
+        );
     }
 
-    // Mark as recording
+    if session.config.mic_enabled {
+        let session_clone = session.clone();
+        let stop = stop_signal.clone();
+
+        tasks.audio = Some(
+            spawn_capture_task("audio", move || {
+                run_audio_capture(session_clone.audio_file.to_string_lossy().to_string(), stop)
+            })
+            .await
+            .map_err(|e| e.to_string())?,
+        );
+    }
+
+    {
+        let mut task_state = state.tasks.lock().await;
+        *task_state = tasks;
+    }
+
     *state.status.write().await = RecordingStatus::Recording;
 
-    log::info!("Recording started: {}", session_name);
-    Ok(session_name)
+    log::info!("Recording started: {}", session.id);
+
+    Ok(session.id)
 }
 
-/// Stop the current recording session and trigger FFmpeg merge
 #[tauri::command]
-pub async fn stop_recording(state: State<'_, RecordingState>) -> Result<String, String> {
+pub async fn stop_recording(
+    state: State<'_, RecordingState>,
+) -> std::result::Result<String, String> {
     {
         let status = state.status.read().await;
+
         if *status != RecordingStatus::Recording {
-            return Err("Not recording".to_string());
+            return Err(RecordingError::NoActiveRecording.to_string());
         }
     }
 
-    // Signal all loops to stop
-    state.stop_signal.store(true, Ordering::Relaxed);
+    *state.status.write().await = RecordingStatus::Stopping;
 
-    // Wait for all tasks to complete
-    if let Some(handle) = state.screen_task.lock().await.take() {
-        handle.await.ok();
-    }
-    if let Some(handle) = state.webcam_task.lock().await.take() {
-        handle.await.ok();
-    }
-    if let Some(handle) = state.audio_task.lock().await.take() {
-        handle.await.ok();
+    state.stop_signal.store(true, Ordering::SeqCst);
+
+    let mut tasks = state.tasks.lock().await;
+
+    if let Some(handle) = tasks.screen.take() {
+        wait_for_task(handle).await.map_err(|e| e.to_string())?;
     }
 
-    *state.status.write().await = RecordingStatus::Stopped;
+    if let Some(handle) = tasks.webcam.take() {
+        wait_for_task(handle).await.map_err(|e| e.to_string())?;
+    }
 
-    // Retrieve session info
-    let session_name = state.session_name.read().await.clone().unwrap_or_default();
-    let output_dir = state.output_dir.read().await.clone();
-    let mic_enabled = *state.mic_enabled.read().await;
-    let webcam_enabled = *state.webcam_enabled.read().await;
-    let corner = state.webcam_corner.read().await.clone();
+    if let Some(handle) = tasks.audio.take() {
+        wait_for_task(handle).await.map_err(|e| e.to_string())?;
+    }
 
-    let temp_dir = std::env::temp_dir();
-    let tmp_screen = temp_dir.join(format!("{}_screen.mp4", session_name)).to_string_lossy().to_string();
-    let tmp_webcam = temp_dir.join(format!("{}_webcam.mp4", session_name)).to_string_lossy().to_string();
-    let tmp_audio = temp_dir.join(format!("{}_audio.wav", session_name)).to_string_lossy().to_string();
-    let final_output = std::path::Path::new(&output_dir)
-        .join(format!("{}.mp4", session_name))
-        .to_string_lossy()
-        .to_string();
+    drop(tasks);
 
-    // Run merge in a blocking thread
-    let final_out_clone = final_output.clone();
-    tokio::task::spawn_blocking(move || {
-        let webcam = if webcam_enabled && std::fs::metadata(&tmp_webcam).map(|m| m.len() > 1024).unwrap_or(false) {
-            Some(tmp_webcam.as_str())
-        } else {
-            None
-        };
-        let audio = if mic_enabled && std::fs::metadata(&tmp_audio).map(|m| m.len() > 1024).unwrap_or(false) {
-            Some(tmp_audio.as_str())
-        } else {
-            None
-        };
+    *state.status.write().await = RecordingStatus::Merging;
 
-        merge_recordings(&tmp_screen, webcam, audio, &final_out_clone, &corner)
-            .map_err(|e| log::error!("Merge error: {}", e))
-            .ok();
+    let session = { state.current_session.read().await.clone() }
+        .ok_or_else(|| RecordingError::NoActiveRecording.to_string())?;
 
-        // Generate thumbnail
-        let thumb_path = final_out_clone.replace(".mp4", "_thumb.jpg");
-        generate_thumbnail(&final_out_clone, &thumb_path)
-            .map_err(|e| log::warn!("Thumbnail error: {}", e))
-            .ok();
+    let output = session.output_file.to_string_lossy().to_string();
 
-        // Cleanup temp files
-        for p in &[&tmp_screen, &tmp_audio] {
-            std::fs::remove_file(p).ok();
-        }
+    let finalize_result = tokio::task::spawn_blocking({
+        let session = session.clone();
+
+        move || finalize_recording(&session)
     })
-    .await
-    .map_err(|e| e.to_string())?;
+    .await;
 
-    *state.status.write().await = RecordingStatus::Idle;
-    *state.session_name.write().await = None;
+    match finalize_result {
+        Ok(Ok(())) => {
+            cleanup_session(&session).await;
 
-    log::info!("Recording saved → {}", final_output);
-    Ok(final_output)
+            *state.status.write().await = RecordingStatus::Idle;
+
+            *state.current_session.write().await = None;
+
+            log::info!(
+                "Recording saved: {} (started {}, duration {:?})",
+                output,
+                session.created_at.format("%Y-%m-%d %H:%M:%S"),
+                session.started_at.elapsed()
+            );
+
+            Ok(output)
+        }
+
+        Ok(Err(e)) => {
+            *state.status.write().await = RecordingStatus::Error(e.to_string());
+
+            Err(e.to_string())
+        }
+
+        Err(e) => {
+            let err = e.to_string();
+
+            *state.status.write().await = RecordingStatus::Error(err.clone());
+
+            Err(err)
+        }
+    }
 }
 
-/// Get current recording status
 #[tauri::command]
-pub async fn get_recording_status(state: State<'_, RecordingState>) -> Result<String, String> {
+pub async fn get_recording_status(
+    state: State<'_, RecordingState>,
+) -> std::result::Result<String, String> {
     let status = state.status.read().await;
-    Ok(match *status {
-        RecordingStatus::Idle => "idle".to_string(),
-        RecordingStatus::Recording => "recording".to_string(),
-        RecordingStatus::Stopped => "stopped".to_string(),
+
+    Ok(match &*status {
+        RecordingStatus::Idle => "idle".into(),
+        RecordingStatus::Starting => "starting".into(),
+        RecordingStatus::Recording => "recording".into(),
+        RecordingStatus::Stopping => "stopping".into(),
+        RecordingStatus::Merging => "merging".into(),
+        RecordingStatus::Error(e) => {
+            format!("error: {}", e)
+        }
     })
 }
 
-/// List all recordings in the output directory
 #[tauri::command]
-pub async fn list_recordings(state: State<'_, RecordingState>) -> Result<Vec<RecordingInfo>, String> {
+pub async fn list_recordings(
+    state: State<'_, RecordingState>,
+) -> std::result::Result<Vec<RecordingInfo>, String> {
     let output_dir = state.output_dir.read().await.clone();
-    let dir = std::path::Path::new(&output_dir);
+
+    let dir = Path::new(&output_dir);
+
     if !dir.exists() {
         return Ok(vec![]);
     }
 
-    let mut recordings = vec![];
+    let mut recordings: Vec<(SystemTime, RecordingInfo)> = vec![];
+
     let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
 
     for entry in entries.flatten() {
         let path = entry.path();
+
         if path.extension().and_then(|e| e.to_str()) != Some("mp4") {
             continue;
         }
+
         let meta = entry.metadata().map_err(|e| e.to_string())?;
-        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+        let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+        let filename = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
         let id = filename.replace(".mp4", "");
+
         let thumb_path = path.to_string_lossy().replace(".mp4", "_thumb.jpg");
-        let thumbnail = if std::path::Path::new(&thumb_path).exists() {
+
+        let thumbnail = if Path::new(&thumb_path).exists() {
             Some(thumb_path)
         } else {
             None
         };
 
-        let created_at = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| {
-                let dt = chrono::DateTime::<Local>::from(std::time::SystemTime::UNIX_EPOCH + d);
-                dt.format("%Y-%m-%dT%H:%M:%S").to_string()
-            })
-            .unwrap_or_default();
+        let created_at: DateTime<Local> = modified.into();
 
-        recordings.push(RecordingInfo {
-            id,
-            filename,
-            path: path.to_string_lossy().to_string(),
-            thumbnail,
-            duration_secs: None, // TODO: probe with ffprobe
-            created_at,
-            size_bytes: meta.len(),
-        });
+        recordings.push((
+            modified,
+            RecordingInfo {
+                id,
+                filename,
+
+                path: path.to_string_lossy().to_string(),
+
+                thumbnail,
+
+                duration_secs: None,
+
+                created_at: created_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+
+                size_bytes: meta.len(),
+            },
+        ));
     }
 
-    // Sort newest first
-    recordings.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    Ok(recordings)
+    recordings.sort_by(|a, b| b.0.cmp(&a.0));
+
+    Ok(recordings.into_iter().map(|(_, r)| r).collect())
 }
 
-/// Delete a recording by path
 #[tauri::command]
-pub async fn delete_recording(path: String) -> Result<(), String> {
+pub async fn delete_recording(path: String) -> std::result::Result<(), String> {
     std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+
     let thumb = path.replace(".mp4", "_thumb.jpg");
-    std::fs::remove_file(&thumb).ok();
+
+    let _ = std::fs::remove_file(thumb);
+
     Ok(())
 }
 
-/// Open the output directory in the system file manager
 #[tauri::command]
-pub async fn open_output_dir(state: State<'_, RecordingState>) -> Result<(), String> {
+pub async fn open_output_dir(state: State<'_, RecordingState>) -> std::result::Result<(), String> {
     let dir = state.output_dir.read().await.clone();
+
     #[cfg(target_os = "windows")]
     std::process::Command::new("explorer")
         .arg(&dir)
@@ -354,5 +559,6 @@ pub async fn open_output_dir(state: State<'_, RecordingState>) -> Result<(), Str
         .arg(&dir)
         .spawn()
         .map_err(|e| e.to_string())?;
+
     Ok(())
 }

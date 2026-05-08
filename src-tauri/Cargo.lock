@@ -2366,7 +2366,9 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tauri-plugin-shell",
+ "thiserror 2.0.18",
  "tokio",
+ "uuid",
  "xcap",
 ]
 

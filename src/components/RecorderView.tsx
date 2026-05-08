@@ -112,7 +112,7 @@ export function RecorderView() {
   } = useRecordingStore();
 
   const isRecording = status === "recording";
-  const isProcessing = status === "stopped";
+  const isProcessing = status === "processing" || status === "stopping" || status === "merging";
 
   const handleToggleRecording = async () => {
     if (isProcessing) return;

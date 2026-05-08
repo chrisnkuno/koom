@@ -32,14 +32,21 @@ export interface RecordingConfig {
   fps: number;
 }
 
+export type RecordingStatus =
+  | "idle"
+  | "starting"
+  | "recording"
+  | "stopping"
+  | "merging"
+  | `error: ${string}`;
+
 export const koomApi = {
   getMonitors: (): Promise<MonitorInfo[]> => invoke("get_monitors"),
   getWebcams: (): Promise<WebcamInfo[]> => invoke("get_webcams"),
   startRecording: (config: RecordingConfig): Promise<string> =>
     invoke("start_recording", { config }),
   stopRecording: (): Promise<string> => invoke("stop_recording"),
-  getRecordingStatus: (): Promise<"idle" | "recording" | "stopped"> =>
-    invoke("get_recording_status"),
+  getRecordingStatus: (): Promise<RecordingStatus> => invoke("get_recording_status"),
   listRecordings: (): Promise<RecordingInfo[]> => invoke("list_recordings"),
   deleteRecording: (path: string): Promise<void> =>
     invoke("delete_recording", { path }),

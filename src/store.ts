@@ -1,7 +1,7 @@
 import { create } from "zustand";
-import { koomApi, MonitorInfo, WebcamInfo, RecordingInfo, RecordingConfig } from "./api";
+import { koomApi, MonitorInfo, WebcamInfo, RecordingInfo, RecordingConfig, RecordingStatus } from "./api";
 
-type AppStatus = "idle" | "recording" | "stopped";
+type AppStatus = RecordingStatus | "processing";
 type Corner = "br" | "bl" | "tr" | "tl";
 type ActiveView = "recorder" | "library" | "settings";
 
@@ -118,7 +118,7 @@ export const useRecordingStore = create<RecordingStore>((set, get) => ({
     if (s.status !== "recording") return;
     // Stop the timer
     if (s.timerRef) clearInterval(s.timerRef);
-    set({ status: "stopped", timerRef: null });
+    set({ status: "processing", timerRef: null });
     try {
       await koomApi.stopRecording();
       set({ status: "idle", sessionName: null });

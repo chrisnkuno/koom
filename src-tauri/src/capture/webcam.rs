@@ -1,4 +1,9 @@
 use anyhow::{anyhow, Result};
+use nokhwa::{
+    pixel_format::RgbFormat,
+    utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType},
+    Camera,
+};
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
@@ -6,33 +11,33 @@ use std::sync::{
     Arc,
 };
 use std::time::{Duration, Instant};
-use nokhwa::{
-    pixel_format::RgbFormat,
-    utils::{CameraIndex, RequestedFormat, RequestedFormatType},
-    Camera,
-};
 
 /// Spawns an FFmpeg process that reads raw RGB24 frames from stdin
 /// and writes an H.264 MP4 for the webcam feed.
-pub fn spawn_ffmpeg_webcam(
-    width: u32,
-    height: u32,
-    fps: u32,
-    output_path: &str,
-) -> Result<Child> {
+pub fn spawn_ffmpeg_webcam(width: u32, height: u32, fps: u32, output_path: &str) -> Result<Child> {
     let child = Command::new("ffmpeg")
         .args([
             "-y",
-            "-f", "rawvideo",
-            "-pixel_format", "rgb24",
-            "-video_size", &format!("{}x{}", width, height),
-            "-framerate", &fps.to_string(),
-            "-i", "-",
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-crf", "23",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "rgb24",
+            "-video_size",
+            &format!("{}x{}", width, height),
+            "-framerate",
+            &fps.to_string(),
+            "-i",
+            "-",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-crf",
+            "23",
             output_path,
         ])
         .stdin(Stdio::piped())
@@ -51,7 +56,9 @@ pub fn run_webcam_capture(
     stop_signal: Arc<AtomicBool>,
 ) -> Result<()> {
     let index = CameraIndex::Index(webcam_index as u32);
-    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(1280, 720, 30));
+    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(
+        CameraFormat::new_from(1280, 720, FrameFormat::MJPEG, fps),
+    ));
 
     let mut camera = Camera::new(index, requested)
         .map_err(|e| anyhow!("Failed to open webcam {}: {}", webcam_index, e))?;
@@ -68,7 +75,9 @@ pub fn run_webcam_capture(
         output_path
     );
 
-    camera.open_stream().map_err(|e| anyhow!("Failed to open webcam stream: {}", e))?;
+    camera
+        .open_stream()
+        .map_err(|e| anyhow!("Failed to open webcam stream: {}", e))?;
 
     let mut child = spawn_ffmpeg_webcam(width, height, fps, &output_path)?;
     let mut stdin = child
@@ -87,18 +96,16 @@ pub fn run_webcam_capture(
         next_frame += frame_duration;
 
         match camera.frame() {
-            Ok(buf) => {
-                match buf.decode_image::<RgbFormat>() {
-                    Ok(img) => {
-                        let raw: &[u8] = img.as_raw();
-                        if let Err(e) = stdin.write_all(raw) {
-                            log::warn!("Webcam FFmpeg stdin write error: {}", e);
-                            break;
-                        }
+            Ok(buf) => match buf.decode_image::<RgbFormat>() {
+                Ok(img) => {
+                    let raw: &[u8] = img.as_raw();
+                    if let Err(e) = stdin.write_all(raw) {
+                        log::warn!("Webcam FFmpeg stdin write error: {}", e);
+                        break;
                     }
-                    Err(e) => log::warn!("Webcam frame decode error: {}", e),
                 }
-            }
+                Err(e) => log::warn!("Webcam frame decode error: {}", e),
+            },
             Err(e) => log::warn!("Webcam frame grab error: {}", e),
         }
     }
